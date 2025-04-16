@@ -28,6 +28,7 @@ import android.content.ContentValues
 import android.content.res.AssetFileDescriptor
 import android.media.AudioManager
 import android.media.MediaPlayer
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
@@ -53,6 +54,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var audioManager: AudioManager
     private var assetMediaPlayer: MediaPlayer? = null
     private val ASSET_AUDIO_FILENAME = "classroom-32941.mp3"
+    private var aec: AcousticEchoCanceler? = null
+    private var ns: NoiseSuppressor? = null
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -85,14 +89,17 @@ class MainActivity : AppCompatActivity() {
             if (assetMediaPlayer?.isPlaying == true) {
                 stopAssetPlayback()
             } else {
-                // Optional: Consider stopping recorder playback if asset is started
-                // if (mediaPlayer?.isPlaying == true) { stopPlayback() }
-                startAssetPlayback(ASSET_AUDIO_FILENAME)
+                val currentAudioSessionId = audioRecord?.audioSessionId
+                if (currentAudioSessionId != null && currentAudioSessionId != AudioManager.ERROR) {
+                    startAssetPlayback(ASSET_AUDIO_FILENAME, currentAudioSessionId)
+                } else {
+                    Log.e("AssetPlayer", "Cannot play asset: AudioRecord not ready or has invalid session ID.")
+                }
             }
         }
     }
 
-    private fun startAssetPlayback(assetFileName: String) {
+    private fun startAssetPlayback(assetFileName: String, audioSessionId: Int) {
         // Release previous instance if any
         stopAssetPlayback()
 
@@ -100,6 +107,7 @@ class MainActivity : AppCompatActivity() {
         var afd: AssetFileDescriptor? = null
         try {
             afd = assets.openFd(assetFileName)
+            assetMediaPlayer?.audioSessionId = audioSessionId
             assetMediaPlayer?.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
             assetMediaPlayer?.prepare() // Use prepareAsync() for non-trivial files on UI thread
             assetMediaPlayer?.start()
@@ -216,7 +224,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
             SAMPLE_RATE,
             CHANNEL_CONFIG,
             AUDIO_FORMAT,
@@ -224,7 +232,14 @@ class MainActivity : AppCompatActivity() {
         ).apply {
             // Enable Acoustic Echo Cancellation
             if (AcousticEchoCanceler.isAvailable()) {
-                AcousticEchoCanceler.create(this.audioSessionId).apply {
+                aec = AcousticEchoCanceler.create(this.audioSessionId).apply {
+                    enabled = true
+                }
+            }
+
+            // Enable Noise Suppressor
+            if (NoiseSuppressor.isAvailable()) {
+                ns = NoiseSuppressor.create(this.audioSessionId).apply {
                     enabled = true
                 }
             }
@@ -271,6 +286,9 @@ class MainActivity : AppCompatActivity() {
         audioRecord?.release()
         audioRecord = null
         recordButton.text = "Start Recording"
+        aec?.enabled = false
+        aec?.release()
+        aec = null
     }
 
     private fun writeWavHeader(out: FileOutputStream, bufferSize: Int) {
