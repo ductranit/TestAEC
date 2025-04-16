@@ -27,12 +27,21 @@ import android.Manifest
 import android.content.ContentValues
 import android.content.res.AssetFileDescriptor
 import android.media.AudioManager
-import android.media.MediaPlayer
 import android.media.audiofx.NoiseSuppressor
+import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
+import androidx.annotation.OptIn
 import androidx.annotation.RequiresApi
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.AssetDataSource
 import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.IOException
@@ -52,11 +61,10 @@ class MainActivity : AppCompatActivity() {
     private val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
     private lateinit var recordButton: Button
     private lateinit var audioManager: AudioManager
-    private var assetMediaPlayer: MediaPlayer? = null
+    private var assetExoPlayer: ExoPlayer? = null
     private val ASSET_AUDIO_FILENAME = "classroom-32941.mp3"
     private var aec: AcousticEchoCanceler? = null
     private var ns: NoiseSuppressor? = null
-
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -86,7 +94,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnPlayAudio.setOnClickListener {
-            if (assetMediaPlayer?.isPlaying == true) {
+            if (assetExoPlayer?.isPlaying == true) {
                 stopAssetPlayback()
             } else {
                 val currentAudioSessionId = audioRecord?.audioSessionId
@@ -99,70 +107,85 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startAssetPlayback(assetFileName: String, audioSessionId: Int) {
+    @OptIn(UnstableApi::class) private fun startAssetPlayback(assetFileName: String, audioSessionId: Int) {
         // Release previous instance if any
         stopAssetPlayback()
 
-        assetMediaPlayer = MediaPlayer()
-        var afd: AssetFileDescriptor? = null
         try {
-            afd = assets.openFd(assetFileName)
-            assetMediaPlayer?.audioSessionId = audioSessionId
-            assetMediaPlayer?.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
-            assetMediaPlayer?.prepare() // Use prepareAsync() for non-trivial files on UI thread
-            assetMediaPlayer?.start()
-            binding.btnPlayAudio.text = "Stop Asset Audio" // Update button text
+            // Initialize ExoPlayer
+            assetExoPlayer = ExoPlayer.Builder(this).build().apply {
+                // Set audio session ID
+                setAudioSessionId(audioSessionId)
 
-            // Handle completion
-            assetMediaPlayer?.setOnCompletionListener {
-                stopAssetPlayback()
-                Log.i("AssetPlayer", "Asset playback completed.")
+                // Create MediaSource from asset
+                val afd: AssetFileDescriptor = assets.openFd(assetFileName)
+                val dataSource = AssetDataSource(this@MainActivity)
+                dataSource.open(
+                    androidx.media3.datasource.DataSpec(
+                        Uri.parse("asset:///$assetFileName"),
+                        afd.startOffset,
+                        afd.length
+                    )
+                )
+                val mediaSource: MediaSource = ProgressiveMediaSource.Factory(
+                    DefaultDataSource.Factory(this@MainActivity)
+                ).createMediaSource(MediaItem.fromUri("asset:///$assetFileName"))
+
+                // Set media source and prepare
+                setMediaSource(mediaSource)
+                prepare()
+                play()
+
+                // Update button text
+                binding.btnPlayAudio.text = "Stop Asset Audio"
+
+                // Handle completion
+                addListener(object : Player.Listener {
+                    override fun onPlaybackStateChanged(state: Int) {
+                        if (state == Player.STATE_ENDED) {
+                            stopAssetPlayback()
+                            Log.i("AssetPlayer", "Asset playback completed.")
+                        }
+                    }
+
+                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        Log.e("AssetPlayer", "Asset playback error: ${error.message}")
+                        stopAssetPlayback()
+                    }
+                })
+
+                // Close AssetFileDescriptor
+                afd.close()
             }
-
-            // Handle errors
-            assetMediaPlayer?.setOnErrorListener { mp, what, extra ->
-                Log.e("AssetPlayer", "Asset playback error - what: $what extra: $extra")
-                stopAssetPlayback() // Clean up on error
-                true // Indicate error was handled
-            }
-
         } catch (e: FileNotFoundException) {
             Log.e("AssetPlayer", "Asset file not found: $assetFileName", e)
-            stopAssetPlayback() // Clean up
+            stopAssetPlayback()
         } catch (e: IOException) {
             Log.e("AssetPlayer", "IOException setting data source or preparing asset: $assetFileName", e)
-            stopAssetPlayback() // Clean up
+            stopAssetPlayback()
         } catch (e: IllegalStateException) {
             Log.e("AssetPlayer", "IllegalStateException during asset playback setup", e)
-            stopAssetPlayback() // Clean up
+            stopAssetPlayback()
         } catch (e: SecurityException) {
             Log.e("AssetPlayer", "SecurityException reading asset: $assetFileName", e)
-            stopAssetPlayback() // Clean up
-        } finally {
-            // Close the AssetFileDescriptor
-            try {
-                afd?.close()
-            } catch (e: IOException) {
-                Log.e("AssetPlayer", "Error closing AssetFileDescriptor", e)
-            }
+            stopAssetPlayback()
         }
     }
 
     private fun stopAssetPlayback() {
-        assetMediaPlayer?.apply {
+        assetExoPlayer?.apply {
             try {
                 if (isPlaying) {
                     stop()
                 }
-                release() // Release resources
+                release()
             } catch (e: IllegalStateException) {
                 Log.e("AssetPlayer", "IllegalStateException on stop/release", e)
-                // Release might still be needed even if stop fails
                 try { release() } catch (e: Exception) { /* Ignore inner exception */ }
             }
         }
-        assetMediaPlayer = null
-        binding.btnPlayAudio.text = "Play Asset Audio" // Reset button text
+        assetExoPlayer = null
+        binding.btnPlayAudio.text = "Play Asset Audio"
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
