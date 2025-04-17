@@ -173,8 +173,6 @@ class MainActivity : AppCompatActivity() {
 
             .setUseHardwareAcousticEchoCanceler(false)
             .setUseHardwareNoiseSuppressor(false)
-            .setUseStereoInput(true)
-            .setUseStereoOutput(true)
             .setSampleRate(SAMPLE_RATE)
             .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
             .createAudioDeviceModule()
