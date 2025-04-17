@@ -26,6 +26,8 @@ import kotlin.concurrent.thread
 import android.Manifest
 import android.content.ContentValues
 import android.content.res.AssetFileDescriptor
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.audiofx.NoiseSuppressor
 import android.net.Uri
@@ -42,9 +44,22 @@ import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.AssetDataSource
+import org.webrtc.AudioSource
+import org.webrtc.AudioTrack
+import org.webrtc.AudioTrackSink
+import org.webrtc.DefaultVideoDecoderFactory
+import org.webrtc.DefaultVideoEncoderFactory
+import org.webrtc.EglBase
+import org.webrtc.Logging
+import org.webrtc.MediaConstraints
+import org.webrtc.PeerConnectionFactory
+import org.webrtc.audio.JavaAudioDeviceModule
+import org.webrtc.voiceengine.WebRtcAudioUtils
 import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.channels.Channels
 
 class MainActivity : AppCompatActivity() {
 
@@ -63,8 +78,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var audioManager: AudioManager
     private var assetExoPlayer: ExoPlayer? = null
     private val ASSET_AUDIO_FILENAME = "classroom-32941.mp3"
-    private var aec: AcousticEchoCanceler? = null
-    private var ns: NoiseSuppressor? = null
+//    private var aec: AcousticEchoCanceler? = null
+//    private var ns: NoiseSuppressor? = null
+
+
+    // WebRTC components
+    private lateinit var peerConnectionFactory: PeerConnectionFactory
+    private var audioDeviceModule: JavaAudioDeviceModule? = null
+    private var audioSource: AudioSource? = null
+    private var audioTrack: AudioTrack? = null
+    private var audioSink: CustomAudioSink? = null
+    private val TAG = "WebRTC"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -105,19 +129,77 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
+        initializeWebRTC()
     }
 
-    @OptIn(UnstableApi::class) private fun startAssetPlayback(assetFileName: String, audioSessionId: Int) {
-        // Release previous instance if any
+    private fun initializeWebRTC() {
+        // Enable WebRTC logging for debugging
+
+        // Initialize EglBase (required for video, but safe to include)
+        val eglBase = EglBase.create()
+        Log.d("WebRTC", "EglBase initialized")
+
+        // Create JavaAudioDeviceModule with default settings
+        audioDeviceModule = JavaAudioDeviceModule.builder(applicationContext)
+            .setAudioRecordErrorCallback(object : JavaAudioDeviceModule.AudioRecordErrorCallback {
+                override fun onWebRtcAudioRecordInitError(errorMessage: String?) {
+                    Log.e(TAG, "ADM Record Init Error: $errorMessage")
+                }
+                override fun onWebRtcAudioRecordStartError(errorCode: JavaAudioDeviceModule.AudioRecordStartErrorCode?, errorMessage: String?) {
+                    Log.e(TAG, "ADM Record Start Error: $errorCode - $errorMessage")
+                }
+                override fun onWebRtcAudioRecordError(errorMessage: String?) {
+                    Log.e(TAG, "ADM Record Error: $errorMessage")
+                }
+            })
+            .setAudioTrackErrorCallback(object : JavaAudioDeviceModule.AudioTrackErrorCallback {
+                override fun onWebRtcAudioTrackInitError(errorMessage: String?) {
+                    Log.e(TAG, "ADM Track Init Error: $errorMessage")
+                }
+                override fun onWebRtcAudioTrackStartError(errorCode: JavaAudioDeviceModule.AudioTrackStartErrorCode?, errorMessage: String?) {
+                    Log.e(TAG, "ADM Track Start Error: $errorCode - $errorMessage")
+                }
+                override fun onWebRtcAudioTrackError(errorMessage: String?) {
+                    Log.e(TAG, "ADM Track Error: $errorMessage")
+                }
+            })
+            .setSamplesReadyCallback(object: JavaAudioDeviceModule.SamplesReadyCallback {
+                override fun onWebRtcAudioRecordSamplesReady(samples: JavaAudioDeviceModule.AudioSamples?) {
+                    Log.e(TAG, "onWebRtcAudioRecordSamplesReady: $samples")
+                }
+
+            })
+
+            .setUseHardwareAcousticEchoCanceler(false)
+            .setUseHardwareNoiseSuppressor(false)
+            .setUseStereoInput(true)
+            .setUseStereoOutput(true)
+            .setSampleRate(SAMPLE_RATE)
+            .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+            .createAudioDeviceModule()
+        Log.d("WebRTC", "JavaAudioDeviceModule created: $audioDeviceModule")
+
+        val factoryOptions = PeerConnectionFactory.Options()
+        val initOption = PeerConnectionFactory.InitializationOptions.builder(this)
+            .createInitializationOptions()
+        PeerConnectionFactory.initialize(initOption)
+        peerConnectionFactory = PeerConnectionFactory.builder()
+            .setOptions(factoryOptions)
+            .setAudioDeviceModule(audioDeviceModule)
+            .createPeerConnectionFactory()
+
+        Logging.enableLogToDebugOutput(Logging.Severity.LS_VERBOSE)
+        Log.d("WebRTC", "WebRTC logging enabled")
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun startAssetPlayback(assetFileName: String, audioSessionId: Int) {
         stopAssetPlayback()
 
         try {
-            // Initialize ExoPlayer
             assetExoPlayer = ExoPlayer.Builder(this).build().apply {
-                // Set audio session ID
                 setAudioSessionId(audioSessionId)
-
-                // Create MediaSource from asset
                 val afd: AssetFileDescriptor = assets.openFd(assetFileName)
                 val dataSource = AssetDataSource(this@MainActivity)
                 dataSource.open(
@@ -131,15 +213,12 @@ class MainActivity : AppCompatActivity() {
                     DefaultDataSource.Factory(this@MainActivity)
                 ).createMediaSource(MediaItem.fromUri("asset:///$assetFileName"))
 
-                // Set media source and prepare
                 setMediaSource(mediaSource)
                 prepare()
                 play()
 
-                // Update button text
                 binding.btnPlayAudio.text = "Stop Asset Audio"
 
-                // Handle completion
                 addListener(object : Player.Listener {
                     override fun onPlaybackStateChanged(state: Int) {
                         if (state == Player.STATE_ENDED) {
@@ -154,20 +233,10 @@ class MainActivity : AppCompatActivity() {
                     }
                 })
 
-                // Close AssetFileDescriptor
                 afd.close()
             }
-        } catch (e: FileNotFoundException) {
-            Log.e("AssetPlayer", "Asset file not found: $assetFileName", e)
-            stopAssetPlayback()
-        } catch (e: IOException) {
-            Log.e("AssetPlayer", "IOException setting data source or preparing asset: $assetFileName", e)
-            stopAssetPlayback()
-        } catch (e: IllegalStateException) {
-            Log.e("AssetPlayer", "IllegalStateException during asset playback setup", e)
-            stopAssetPlayback()
-        } catch (e: SecurityException) {
-            Log.e("AssetPlayer", "SecurityException reading asset: $assetFileName", e)
+        } catch (e: Exception) {
+            Log.e("AssetPlayer", "Error playing asset: $assetFileName", e)
             stopAssetPlayback()
         }
     }
@@ -175,13 +244,10 @@ class MainActivity : AppCompatActivity() {
     private fun stopAssetPlayback() {
         assetExoPlayer?.apply {
             try {
-                if (isPlaying) {
-                    stop()
-                }
+                if (isPlaying) stop()
                 release()
-            } catch (e: IllegalStateException) {
-                Log.e("AssetPlayer", "IllegalStateException on stop/release", e)
-                try { release() } catch (e: Exception) { /* Ignore inner exception */ }
+            } catch (e: Exception) {
+                Log.e("AssetPlayer", "Error stopping/releasing player", e)
             }
         }
         assetExoPlayer = null
@@ -237,81 +303,91 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    @SuppressLint("MissingPermission")
+    @SuppressLint("MissingPermission", "NewApi")
     private fun startRecording() {
-        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-        val minBufferSize = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE,
-            CHANNEL_CONFIG,
-            AUDIO_FORMAT
-        )
+//        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
 
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            SAMPLE_RATE,
-            CHANNEL_CONFIG,
-            AUDIO_FORMAT,
-            minBufferSize
-        ).apply {
-            // Enable Acoustic Echo Cancellation
-            if (AcousticEchoCanceler.isAvailable()) {
-                aec = AcousticEchoCanceler.create(this.audioSessionId).apply {
-                    enabled = true
-                }
-            }
+//        // Request audio focus
+//        val audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+//            .setAudioAttributes(
+//                AudioAttributes.Builder()
+//                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+//                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+//                    .build()
+//            )
+//            .build()
+//        val focusResult = audioManager.requestAudioFocus(audioFocusRequest)
+//        if (focusResult != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+//            Log.e("WebRTC", "Audio focus request failed")
+//            return
+//        }
+//        Log.d("WebRTC", "Audio focus granted")
 
-            // Enable Noise Suppressor
-            if (NoiseSuppressor.isAvailable()) {
-                ns = NoiseSuppressor.create(this.audioSessionId).apply {
-                    enabled = true
-                }
-            }
+        // Create audio source with constraints for noise suppression, AGC, and echo cancellation
+        val audioConstraints = MediaConstraints()
+        audioConstraints.mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
+        audioConstraints.mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "true"))
+//        audioConstraints.mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
+//        audioConstraints.mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", "true"))
+//        audioConstraints.mandatory.add(MediaConstraints.KeyValuePair("googAudioMirroring", "false"))
+
+        audioSource = peerConnectionFactory.createAudioSource(audioConstraints)
+        if (audioSource == null) {
+            Log.e("WebRTC", "Failed to create AudioSource")
+            return
         }
 
-        val audioData = ByteArray(minBufferSize)
-        val outputFile = File(cacheDir,
-            "recording_${System.currentTimeMillis()}.wav")
+        audioTrack = peerConnectionFactory.createAudioTrack("audio_track", audioSource)
+        if (audioTrack == null) {
+            Log.e("WebRTC", "Failed to create AudioTrack")
+        }
 
-        audioRecord?.startRecording()
+        Log.d("WebRTC", "AudioTrack created: $audioTrack, AudioSource: $audioSource")
+
+        val outputFile = File(cacheDir, "recording_${System.currentTimeMillis()}.wav")
+        audioSink = CustomAudioSink(outputFile, SAMPLE_RATE) { data ->
+            Log.d("WebRTC", "Audio data received: ${data} bytes")
+        }
+        Log.d("WebRTC", "CustomAudioSink created: $audioSink")
+
+        audioTrack?.addSink(audioSink)
+        Log.d("WebRTC", "Sink added to AudioTrack")
+
+        audioTrack?.setEnabled(true)
+        Log.d(TAG, "AudioTrack enabled. Current state: ${audioTrack?.state()}")
+
         isRecording = true
         recordButton.text = "Stop Recording"
 
         thread {
-            FileOutputStream(outputFile).use { fos ->
-                // Write WAV header
-                writeWavHeader(fos, minBufferSize)
+            while (isRecording) {
+                Thread.sleep(100)
 
-                while (isRecording) {
-                    val read = audioRecord?.read(audioData, 0, minBufferSize) ?: 0
-                    if (read > 0) {
-                        fos.write(audioData, 0, read)
-                    }
-                }
-
-                // Update WAV header with final size
-                updateWavHeader(outputFile)
+//                Log.d(TAG, "AudioTrack state: ${audioTrack?.state()}")
             }
 
-            // After recording is complete, copy to shared storage
-            if (!isRecording) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    saveToSharedStorage(outputFile)
-                } else {
-                    saveToExternalStorage(outputFile)
-                }
+            audioSink?.close()
+            updateWavHeader(outputFile)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                saveToSharedStorage(outputFile)
+            } else {
+                saveToExternalStorage(outputFile)
             }
         }
     }
 
     private fun stopRecording() {
         isRecording = false
-        audioRecord?.stop()
-        audioRecord?.release()
-        audioRecord = null
+        audioTrack?.setEnabled(false)
+        audioTrack?.removeSink(audioSink)
+        audioTrack?.dispose()
+        audioSource?.dispose()
+        audioSink?.close()
+        audioTrack = null
+        audioSource = null
+        audioSink = null
         recordButton.text = "Start Recording"
-        aec?.enabled = false
-        aec?.release()
-        aec = null
     }
 
     private fun writeWavHeader(out: FileOutputStream, bufferSize: Int) {
@@ -428,6 +504,84 @@ class MainActivity : AppCompatActivity() {
             raf.write((totalAudioLen shr 8 and 0xff).toInt())
             raf.write((totalAudioLen shr 16 and 0xff).toInt())
             raf.write((totalAudioLen shr 24 and 0xff).toInt())
+        }
+    }
+}
+
+class CustomAudioSink(
+    private val outputFile: File,
+    private val sampleRate: Int,
+    private val onAudioData: (ByteBuffer) -> Unit
+) : AudioTrackSink {
+    private var fileOutputStream: FileOutputStream? = null
+
+    init {
+        // Initialize FileOutputStream and write WAV header
+        fileOutputStream = FileOutputStream(outputFile)
+        writeWavHeader(fileOutputStream!!, sampleRate)
+    }
+
+    fun close() {
+        fileOutputStream?.close()
+        fileOutputStream = null
+    }
+
+    private fun writeWavHeader(out: FileOutputStream, SAMPLE_RATE: Int) {
+        val totalAudioLen = 0L // Will be updated later
+        val totalDataLen = totalAudioLen + 36
+        val channels = 1
+        val byteRate = SAMPLE_RATE * channels * 2 // 2 bytes per sample
+
+        val header = ByteArray(44).apply {
+            set(0, 'R'.code.toByte()); set(1, 'I'.code.toByte())
+            set(2, 'F'.code.toByte()); set(3, 'F'.code.toByte())
+            set(4, (totalDataLen and 0xff).toByte())
+            set(5, (totalDataLen shr 8 and 0xff).toByte())
+            set(6, (totalDataLen shr 16 and 0xff).toByte())
+            set(7, (totalDataLen shr 24 and 0xff).toByte())
+            set(8, 'W'.code.toByte()); set(9, 'A'.code.toByte())
+            set(10, 'V'.code.toByte()); set(11, 'E'.code.toByte())
+            set(12, 'f'.code.toByte()); set(13, 'm'.code.toByte())
+            set(14, 't'.code.toByte()); set(15, ' '.code.toByte())
+            set(16, 16); set(17, 0); set(18, 0); set(19, 0) // Subchunk1Size
+            set(20, 1); set(21, 0) // AudioFormat PCM = 1
+            set(22, channels.toByte()); set(23, 0) // NumChannels
+            set(24, (SAMPLE_RATE and 0xff).toByte())
+            set(25, (SAMPLE_RATE shr 8 and 0xff).toByte())
+            set(26, (SAMPLE_RATE shr 16 and 0xff).toByte())
+            set(27, (SAMPLE_RATE shr 24 and 0xff).toByte())
+            set(28, (byteRate and 0xff).toByte())
+            set(29, (byteRate shr 8 and 0xff).toByte())
+            set(30, (byteRate shr 16 and 0xff).toByte())
+            set(31, (byteRate shr 24 and 0xff).toByte())
+            set(32, 2); set(33, 0) // BlockAlign
+            set(34, 16); set(35, 0) // BitsPerSample
+            set(36, 'd'.code.toByte()); set(37, 'a'.code.toByte())
+            set(38, 't'.code.toByte()); set(39, 'a'.code.toByte())
+            set(40, (totalAudioLen and 0xff).toByte())
+            set(41, (totalAudioLen shr 8 and 0xff).toByte())
+            set(42, (totalAudioLen shr 16 and 0xff).toByte())
+            set(43, (totalAudioLen shr 24 and 0xff).toByte())
+        }
+        out.write(header)
+    }
+
+    override fun onData(
+        audioData: ByteBuffer?,
+        p1: Int,
+        p2: Int,
+        p3: Int,
+        p4: Int,
+        p5: Long
+    ) {
+        Log.d("WebRTC_Sink", ">>> onData called! Buffer null: ${audioData == null}")
+        audioData?.let {
+            // Write audio data to file
+            val channel = Channels.newChannel(fileOutputStream)
+            channel.write(it)
+//            fileOutputStream?.write(it)
+            // Pass data to callback for further processing if needed
+            onAudioData(it)
         }
     }
 }
