@@ -170,13 +170,11 @@ class MainActivity : AppCompatActivity() {
                 }
 
             })
-
-            .setUseHardwareAcousticEchoCanceler(false)
             .setUseHardwareNoiseSuppressor(false)
             .setSampleRate(SAMPLE_RATE)
             .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
             .createAudioDeviceModule()
-        Log.d("WebRTC", "JavaAudioDeviceModule created: $audioDeviceModule")
+        Log.d(TAG, "JavaAudioDeviceModule created: $audioDeviceModule")
 
         val factoryOptions = PeerConnectionFactory.Options()
         val initOption = PeerConnectionFactory.InitializationOptions.builder(this)
@@ -331,25 +329,25 @@ class MainActivity : AppCompatActivity() {
 
         audioSource = peerConnectionFactory.createAudioSource(audioConstraints)
         if (audioSource == null) {
-            Log.e("WebRTC", "Failed to create AudioSource")
+            Log.e(TAG, "Failed to create AudioSource")
             return
         }
 
         audioTrack = peerConnectionFactory.createAudioTrack("audio_track", audioSource)
         if (audioTrack == null) {
-            Log.e("WebRTC", "Failed to create AudioTrack")
+            Log.e(TAG, "Failed to create AudioTrack")
         }
 
-        Log.d("WebRTC", "AudioTrack created: $audioTrack, AudioSource: $audioSource")
+        Log.d(TAG, "AudioTrack created: $audioTrack, AudioSource: $audioSource")
 
         val outputFile = File(cacheDir, "recording_${System.currentTimeMillis()}.wav")
         audioSink = CustomAudioSink(outputFile, SAMPLE_RATE) { data ->
-            Log.d("WebRTC", "Audio data received: ${data} bytes")
+            Log.d(TAG, "Audio data received: ${data} bytes")
         }
-        Log.d("WebRTC", "CustomAudioSink created: $audioSink")
+        Log.d(TAG, "CustomAudioSink created: $audioSink")
 
         audioTrack?.addSink(audioSink)
-        Log.d("WebRTC", "Sink added to AudioTrack")
+        Log.d(TAG, "Sink added to AudioTrack")
 
         audioTrack?.setEnabled(true)
         Log.d(TAG, "AudioTrack enabled. Current state: ${audioTrack?.state()}")
@@ -386,46 +384,6 @@ class MainActivity : AppCompatActivity() {
         audioSource = null
         audioSink = null
         recordButton.text = "Start Recording"
-    }
-
-    private fun writeWavHeader(out: FileOutputStream, bufferSize: Int) {
-        val totalAudioLen = 0L // Will be updated later
-        val totalDataLen = totalAudioLen + 36
-        val channels = 1
-        val byteRate = SAMPLE_RATE * channels * 2 // 2 bytes per sample
-
-        val header = ByteArray(44).apply {
-            set(0, 'R'.code.toByte()); set(1, 'I'.code.toByte())
-            set(2, 'F'.code.toByte()); set(3, 'F'.code.toByte())
-            set(4, (totalDataLen and 0xff).toByte())
-            set(5, (totalDataLen shr 8 and 0xff).toByte())
-            set(6, (totalDataLen shr 16 and 0xff).toByte())
-            set(7, (totalDataLen shr 24 and 0xff).toByte())
-            set(8, 'W'.code.toByte()); set(9, 'A'.code.toByte())
-            set(10, 'V'.code.toByte()); set(11, 'E'.code.toByte())
-            set(12, 'f'.code.toByte()); set(13, 'm'.code.toByte())
-            set(14, 't'.code.toByte()); set(15, ' '.code.toByte())
-            set(16, 16); set(17, 0); set(18, 0); set(19, 0) // Subchunk1Size
-            set(20, 1); set(21, 0) // AudioFormat PCM = 1
-            set(22, channels.toByte()); set(23, 0) // NumChannels
-            set(24, (SAMPLE_RATE and 0xff).toByte())
-            set(25, (SAMPLE_RATE shr 8 and 0xff).toByte())
-            set(26, (SAMPLE_RATE shr 16 and 0xff).toByte())
-            set(27, (SAMPLE_RATE shr 24 and 0xff).toByte())
-            set(28, (byteRate and 0xff).toByte())
-            set(29, (byteRate shr 8 and 0xff).toByte())
-            set(30, (byteRate shr 16 and 0xff).toByte())
-            set(31, (byteRate shr 24 and 0xff).toByte())
-            set(32, 2); set(33, 0) // BlockAlign
-            set(34, 16); set(35, 0) // BitsPerSample
-            set(36, 'd'.code.toByte()); set(37, 'a'.code.toByte())
-            set(38, 't'.code.toByte()); set(39, 'a'.code.toByte())
-            set(40, (totalAudioLen and 0xff).toByte())
-            set(41, (totalAudioLen shr 8 and 0xff).toByte())
-            set(42, (totalAudioLen shr 16 and 0xff).toByte())
-            set(43, (totalAudioLen shr 24 and 0xff).toByte())
-        }
-        out.write(header)
     }
 
     private fun saveToExternalStorage(tempFile: File) {
